@@ -1,115 +1,135 @@
 import streamlit as st
-from cryptography.fernet import Fernet
 import hashlib
-import base64
+import json
 import os
+import time
+from cryptography.fernet import Fernet
+from hashlib import pbkdf2_hmac
 
-# In-memory storage for user data
-stored_data = {}
+# Constants
+DATA_FILE = "data.json"
+KEY = Fernet.generate_key()
+cipher = Fernet(KEY)
+FAILED_ATTEMPTS_LIMIT = 3
+LOCKOUT_TIME = 60  # seconds
 
-# Function to generate a Fernet key from a passkey
-def generate_key(passkey):
-    # Hash the passkey using SHA-256
-    digest = hashlib.sha256(passkey.encode()).digest()
-    # Encode the hash in URL-safe base64
-    return base64.urlsafe_b64encode(digest)
+# Load data from JSON
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-# Function to encrypt data using the passkey
-def encrypt_data(data, passkey):
-    key = generate_key(passkey)
-    fernet = Fernet(key)
-    return fernet.encrypt(data.encode()).decode()
+# Save data to JSON
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-# Function to decrypt data using the passkey
-def decrypt_data(encrypted_data, passkey):
-    key = generate_key(passkey)
-    fernet = Fernet(key)
-    return fernet.decrypt(encrypted_data.encode()).decode()
+# Hash passkey using PBKDF2
+def hash_passkey(passkey, salt="static_salt"):
+    return pbkdf2_hmac('sha256', passkey.encode(), salt.encode(), 100000).hex()
 
-# Initialize session state variables
-if 'authenticated' not in st.session_state:
-    st.session_state.authenticated = False
-if 'attempts' not in st.session_state:
-    st.session_state.attempts = 0
-if 'current_user' not in st.session_state:
-    st.session_state.current_user = None
+# Encrypt data
+def encrypt_data(text):
+    return cipher.encrypt(text.encode()).decode()
 
-# Page configuration
-st.set_page_config(page_title="🔐 Secure Data Encryption", page_icon="🔐", layout="centered")
+# Decrypt data
+def decrypt_data(encrypted_text):
+    return cipher.decrypt(encrypted_text.encode()).decode()
 
-# Title
-st.markdown("""
-    # 🔐 Secure Data Encryption System
-    ### Store and retrieve your data securely with a unique passkey.
-""")
+# Initialize session state
+if "users" not in st.session_state:
+    st.session_state.users = load_data()
 
-# Login function
-def login():
-    st.session_state.authenticated = False
-    st.session_state.attempts = 0
-    st.session_state.current_user = None
-    st.success("🔓 Logged out successfully.")
+if "failed_attempts" not in st.session_state:
+    st.session_state.failed_attempts = 0
 
-# Logout button
-if st.session_state.authenticated:
-    if st.button("🔒 Logout"):
-        login()
+if "locked_until" not in st.session_state:
+    st.session_state.locked_until = 0
 
-# Authentication
-if not st.session_state.authenticated:
-    st.subheader("🔑 Login")
-    username = st.text_input("Username")
-    passkey = st.text_input("Passkey", type="password")
-    if st.button("Login"):
-        if username in stored_data:
-            hashed_passkey = hashlib.sha256(passkey.encode()).hexdigest()
-            if stored_data[username]['passkey'] == hashed_passkey:
-                st.session_state.authenticated = True
-                st.session_state.current_user = username
-                st.success("✅ Logged in successfully.")
+# Page Config
+st.set_page_config(page_title="Secure Data System", page_icon="🔒")
+
+# Navigation
+st.sidebar.title("🔐 Navigation")
+menu = st.sidebar.radio("Go to", ["Home", "Register", "Store Data", "Retrieve Data"])
+
+st.title("🔐 Secure Data Encryption System")
+
+if menu == "Home":
+    st.markdown("### Welcome!")
+    st.info("Use this app to securely store and retrieve personal data using passkeys.")
+
+elif menu == "Register":
+    st.subheader("🆕 User Registration")
+    username = st.text_input("Enter Username:")
+    userid = st.text_input("Enter User ID:")
+    passkey = st.text_input("Set Passkey:", type="password")
+
+    if st.button("Register"):
+        if username and userid and passkey:
+            user_key = f"{username}:{userid}"
+            if user_key in st.session_state.users:
+                st.warning("⚠️ User already exists!")
             else:
-                st.session_state.attempts += 1
-                st.error(f"❌ Incorrect passkey. Attempt {st.session_state.attempts}/3.")
-                if st.session_state.attempts >= 3:
-                    st.warning("⚠️ Too many failed attempts. Please try again later.")
+                st.session_state.users[user_key] = {
+                    "passkey": hash_passkey(passkey),
+                    "data": ""
+                }
+                save_data(st.session_state.users)
+                st.success("✅ User registered successfully!")
         else:
+            st.error("❌ All fields are required!")
+
+elif menu == "Store Data":
+    st.subheader("📂 Store Data")
+    username = st.text_input("Username:")
+    userid = st.text_input("User ID:")
+    passkey = st.text_input("Passkey:", type="password")
+    user_data = st.text_area("Enter data to encrypt:")
+
+    if st.button("Encrypt & Store"):
+        user_key = f"{username}:{userid}"
+        user_record = st.session_state.users.get(user_key)
+
+        if not user_record:
             st.error("❌ Username not found.")
-else:
-    st.subheader(f"Welcome, {st.session_state.current_user}!")
-
-    # Data encryption
-    st.markdown("### 🔐 Encrypt Data")
-    data_to_encrypt = st.text_area("Enter data to encrypt")
-    encryption_passkey = st.text_input("Enter a new passkey", type="password")
-    if st.button("Encrypt and Store"):
-        if data_to_encrypt and encryption_passkey:
-            encrypted_text = encrypt_data(data_to_encrypt, encryption_passkey)
-            hashed_passkey = hashlib.sha256(encryption_passkey.encode()).hexdigest()
-            stored_data[st.session_state.current_user] = {
-                "encrypted_text": encrypted_text,
-                "passkey": hashed_passkey
-            }
-            st.success("✅ Data encrypted and stored successfully.")
+        elif user_record["passkey"] != hash_passkey(passkey):
+            st.error("❌ Incorrect passkey.")
         else:
-            st.error("❌ Please provide both data and a passkey.")
+            encrypted = encrypt_data(user_data)
+            st.session_state.users[user_key]["data"] = encrypted
+            save_data(st.session_state.users)
+            st.success("✅ Data encrypted and stored!")
 
-    # Data decryption
-    st.markdown("### 🔓 Decrypt Data")
-    decryption_passkey = st.text_input("Enter your passkey to decrypt data", type="password")
-    if st.button("Decrypt"):
-        if st.session_state.current_user in stored_data:
-            try:
-                decrypted_text = decrypt_data(
-                    stored_data[st.session_state.current_user]['encrypted_text'],
-                    decryption_passkey
-                )
-                st.success("✅ Data decrypted successfully:")
-                st.code(decrypted_text)
-            except Exception as e:
-                st.session_state.attempts += 1
-                st.error(f"❌ Decryption failed. Attempt {st.session_state.attempts}/3.")
-                if st.session_state.attempts >= 3:
-                    st.warning("⚠️ Too many failed attempts. Logging out.")
-                    login()
-        else:
-            st.error("❌ No data found for decryption.")
+elif menu == "Retrieve Data":
+    st.subheader("🔎 Retrieve Data")
+    if time.time() < st.session_state.locked_until:
+        st.error("🔐 Locked due to multiple failed attempts. Try again later.")
+    else:
+        username = st.text_input("Username:")
+        userid = st.text_input("User ID:")
+        passkey = st.text_input("Passkey:", type="password")
+
+        if st.button("Retrieve"):
+            user_key = f"{username}:{userid}"
+            user_record = st.session_state.users.get(user_key)
+
+            if not user_record:
+                st.error("❌ Username not found.")
+            elif user_record["passkey"] != hash_passkey(passkey):
+                st.session_state.failed_attempts += 1
+                attempts_left = FAILED_ATTEMPTS_LIMIT - st.session_state.failed_attempts
+                st.error(f"❌ Incorrect passkey! Attempts left: {attempts_left}")
+
+                if st.session_state.failed_attempts >= FAILED_ATTEMPTS_LIMIT:
+                    st.session_state.locked_until = time.time() + LOCKOUT_TIME
+                    st.warning("🔒 Too many failed attempts. Locked out temporarily.")
+            else:
+                st.session_state.failed_attempts = 0
+                encrypted_data = user_record.get("data")
+                if encrypted_data:
+                    decrypted = decrypt_data(encrypted_data)
+                    st.success(f"✅ Decrypted Data:\n\n{decrypted}")
+                else:
+                    st.info("📭 No data found for this user.")
